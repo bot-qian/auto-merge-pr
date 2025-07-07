@@ -10,6 +10,13 @@ jobs:
   auto_merge:
     runs-on: ubuntu-latest
     
+    # 添加必要的权限
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      statuses: read
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -21,8 +28,8 @@ jobs:
 
       - name: Auto merge PRs
         env:
-          # 使用正确的token变量名
-          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+          # 使用 github.token 而不是自定义 token
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo "🔍 Getting all open pull requests..."
           
@@ -55,7 +62,7 @@ jobs:
             mergeable=$(echo "$pr_status" | jq -r '.mergeable')
             review_decision=$(echo "$pr_status" | jq -r '.reviewDecision')
             
-            # 检查CI状态 - 使用更可靠的方法
+            # 检查CI状态
             echo "🧪 Checking CI status..."
             all_checks_passed=true
             
