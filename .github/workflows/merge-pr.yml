@@ -1,8 +1,8 @@
 name: Auto Merge Pull Requests
 on:
   schedule:
-    - cron: "0 0 * * *"  # 每天运行一次
-  workflow_dispatch:  # 允许手动触发
+    - cron: "0 0 * * *"
+  workflow_dispatch:
   pull_request:
     types: [opened, synchronize, ready_for_review]
 
@@ -10,16 +10,21 @@ jobs:
   auto_merge:
     runs-on: ubuntu-latest
     
-    # 添加必要的权限
+    # 增加更全面的权限
     permissions:
-      contents: write
-      pull-requests: write
-      checks: read
-      statuses: read
+      contents: write          # 写入仓库内容
+      pull-requests: write     # 写入PR
+      checks: read            # 读取检查状态
+      statuses: read          # 读取状态
+      actions: read           # 读取actions状态
+      metadata: read          # 读取仓库元数据
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # 使用 token 进行 checkout，确保后续操作有权限
+          token: ${{ github.token }}
 
       - name: Set up Git
         run: |
@@ -28,10 +33,15 @@ jobs:
 
       - name: Auto merge PRs
         env:
-          # 使用 github.token 而不是自定义 token
           GH_TOKEN: ${{ github.token }}
+          # 添加 GitHub token 作为备用
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           echo "🔍 Getting all open pull requests..."
+          
+          # 首先验证权限
+          echo "🔐 Checking GitHub CLI authentication..."
+          gh auth status
           
           # 获取所有开放的PR
           prs=$(gh pr list --state open --json number,title,headRefName,author,baseRefName)
@@ -103,6 +113,9 @@ jobs:
             if [[ "$mergeable" == "MERGEABLE" ]] && [[ "$all_checks_passed" == true ]]; then
               echo "✅ PR is ready for merge!"
               
+              # 尝试合并，添加更详细的错误处理
+              echo "🔄 Attempting to merge PR #$pr_number..."
+              
               # 检查是否是受保护的分支
               protected_branches=("main" "master" "develop" "staging")
               is_protected=false
@@ -114,16 +127,30 @@ jobs:
                 fi
               done
               
+              # 尝试合并
               if [[ "$is_protected" == true ]]; then
                 echo "⚠️ Protected branch detected: $head_branch"
                 echo "🔄 Merging without deleting branch..."
-                gh pr merge $pr_number --squash
+                if gh pr merge $pr_number --squash; then
+                  echo "🎉 Successfully merged PR #$pr_number"
+                else
+                  echo "❌ Failed to merge PR #$pr_number"
+                  echo "💡 This might be due to branch protection rules or insufficient permissions"
+                fi
               else
                 echo "🔄 Merging and deleting feature branch: $head_branch"
-                gh pr merge $pr_number --squash --delete-branch
+                if gh pr merge $pr_number --squash --delete-branch; then
+                  echo "🎉 Successfully merged PR #$pr_number"
+                else
+                  echo "❌ Failed to merge PR #$pr_number"
+                  echo "💡 Trying merge without deleting branch..."
+                  if gh pr merge $pr_number --squash; then
+                    echo "🎉 Successfully merged PR #$pr_number (branch not deleted)"
+                  else
+                    echo "❌ Failed to merge PR #$pr_number completely"
+                  fi
+                fi
               fi
-              
-              echo "🎉 Successfully merged PR #$pr_number"
               
             else
               echo "⏸️ PR #$pr_number is not ready for auto-merge"
