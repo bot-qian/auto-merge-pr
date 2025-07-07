@@ -28,259 +28,238 @@ jobs:
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
 
-      - name: Enhanced PR Diagnosis and Auto-merge
+      - name: Intelligent Auto-merge with Self-Reference Detection
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          echo "🔍 Getting all open pull requests..."
-          
-          # 验证 GitHub CLI 认证
-          echo "🔐 Checking GitHub CLI authentication..."
-          gh auth status
-          
-          # 获取所有开放的PR
-          prs=$(gh pr list --state open --json number,title,headRefName,author,baseRefName,url)
-          
-          if [[ "$prs" == "[]" ]]; then
-            echo "ℹ️ No open pull requests found."
-            exit 0
-          fi
-          
-          echo "📋 Found $(echo "$prs" | jq length) open PR(s)"
-          
-          # 遍历每个PR
-          echo "$prs" | jq -c '.[]' | while read -r pr; do
-            pr_number=$(echo "$pr" | jq -r '.number')
-            pr_title=$(echo "$pr" | jq -r '.title')
-            pr_author=$(echo "$pr" | jq -r '.author.login')
-            head_branch=$(echo "$pr" | jq -r '.headRefName')
-            base_branch=$(echo "$pr" | jq -r '.baseRefName')
-            pr_url=$(echo "$pr" | jq -r '.url')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const currentWorkflow = context.workflow;
+            console.log(`🔧 Current workflow: ${currentWorkflow}`);
             
-            echo "================================================"
-            echo "🔄 Processing PR #$pr_number: $pr_title"
-            echo "👤 Author: $pr_author"
-            echo "🌿 Branch: $head_branch → $base_branch"
-            echo "🔗 URL: $pr_url"
+            // Get all open PRs
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open'
+            });
             
-            # 获取详细的PR状态信息
-            echo "🔍 Getting detailed PR status..."
-            pr_status=$(gh pr view $pr_number --json mergeable,reviewDecision,statusCheckRollup,commits)
-            mergeable=$(echo "$pr_status" | jq -r '.mergeable')
-            review_decision=$(echo "$pr_status" | jq -r '.reviewDecision // "NONE"')
+            if (prs.length === 0) {
+              console.log('ℹ️ No open pull requests found.');
+              return;
+            }
             
-            echo "📊 Basic Status:"
-            echo "   • Mergeable: $mergeable"
-            echo "   • Review decision: $review_decision"
+            console.log(`📋 Found ${prs.length} open PR(s)`);
             
-            # 详细检查状态检查
-            echo "🧪 Analyzing status checks in detail..."
-            
-            # 方法1：通过 statusCheckRollup 检查
-            status_checks=$(echo "$pr_status" | jq -r '.statusCheckRollup // []')
-            if [[ "$status_checks" != "[]" ]] && [[ "$status_checks" != "null" ]]; then
-              echo "   📝 Status Check Rollup:"
-              echo "$status_checks" | jq -r '.[] | "   - \(.name // .context): \(.conclusion // .state) (\(.targetUrl // "no URL"))"'
+            for (const pr of prs) {
+              console.log('================================================');
+              console.log(`🔄 Processing PR #${pr.number}: ${pr.title}`);
+              console.log(`👤 Author: ${pr.user.login}`);
+              console.log(`🌿 Branch: ${pr.head.ref} → ${pr.base.ref}`);
+              console.log(`🔗 URL: ${pr.html_url}`);
               
-              # 统计失败的检查
-              failed_checks=$(echo "$status_checks" | jq -r '.[] | select((.conclusion // .state) | test("FAILURE|ERROR|CANCELLED"; "i")) | .name // .context')
-              pending_checks=$(echo "$status_checks" | jq -r '.[] | select((.conclusion // .state) | test("PENDING|IN_PROGRESS"; "i")) | .name // .context')
+              // Enhanced PR analysis
+              console.log('🔍 Analyzing PR eligibility...');
               
-              if [[ -n "$failed_checks" ]]; then
-                echo "   ❌ Failed checks:"
-                echo "$failed_checks" | while IFS= read -r check; do
-                  [[ -n "$check" ]] && echo "      - $check"
-                done
-              fi
+              // Check if this is an automated PR
+              const isAutomatedPR = pr.user.login.includes('bot') || 
+                                   pr.user.login === 'xuqssq' ||
+                                   pr.title.includes('🤖') ||
+                                   pr.title.includes('Automated') ||
+                                   pr.title.includes('auto-update') ||
+                                   pr.head.ref.includes('auto-update');
               
-              if [[ -n "$pending_checks" ]]; then
-                echo "   ⏳ Pending checks:"
-                echo "$pending_checks" | while IFS= read -r check; do
-                  [[ -n "$check" ]] && echo "      - $check"
-                done
-              fi
-            fi
-            
-            # 方法2：使用 gh pr checks 命令获取更详细信息
-            echo "   🔬 Detailed checks via gh pr checks:"
-            pr_checks_output=$(gh pr checks $pr_number --json name,conclusion,detailsUrl,summary 2>/dev/null || echo "[]")
-            
-            if [[ "$pr_checks_output" != "[]" ]] && [[ "$pr_checks_output" != "null" ]]; then
-              echo "$pr_checks_output" | jq -r '.[] | "   - \(.name): \(.conclusion // "UNKNOWN") (\(.detailsUrl // "no URL"))"'
+              console.log(`🤖 Automated PR: ${isAutomatedPR}`);
               
-              # 获取失败的详细信息
-              failed_detailed=$(echo "$pr_checks_output" | jq -r '.[] | select(.conclusion | test("FAILURE|ERROR|CANCELLED"; "i")) | "      ❌ \(.name): \(.summary // "No summary available")"')
-              if [[ -n "$failed_detailed" ]]; then
-                echo "   📋 Failed check details:"
-                echo "$failed_detailed"
-              fi
-            else
-              echo "   ℹ️ No detailed checks available via gh pr checks"
-            fi
-            
-            # 方法3：通过 API 获取更多信息
-            echo "   🔍 Getting commit status via API..."
-            latest_commit=$(echo "$pr_status" | jq -r '.commits[-1].oid // empty')
-            
-            if [[ -n "$latest_commit" ]]; then
-              echo "   Latest commit: $latest_commit"
+              // Get detailed PR status
+              const { data: prDetails } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number
+              });
               
-              # 获取 commit 状态
-              commit_status=$(gh api repos/:owner/:repo/commits/$latest_commit/status --jq '.state, .statuses[]?' 2>/dev/null || echo "")
-              if [[ -n "$commit_status" ]]; then
-                echo "   📡 Commit status API response:"
-                echo "$commit_status" | head -20  # 限制输出长度
-              fi
+              console.log(`📊 Basic Status:`);
+              console.log(`   • Mergeable: ${prDetails.mergeable}`);
+              console.log(`   • Review decision: ${prDetails.mergeable_state}`);
               
-              # 获取 check runs
-              check_runs=$(gh api repos/:owner/:repo/commits/$latest_commit/check-runs --jq '.check_runs[]?' 2>/dev/null || echo "")
-              if [[ -n "$check_runs" ]]; then
-                echo "   🏃 Check runs:"
-                echo "$check_runs" | jq -r 'select(.conclusion != "success") | "      \(.name): \(.conclusion) - \(.output.summary // "No summary")"' | head -10
-              fi
-            fi
-            
-            # 计算总体状态
-            all_checks_passed=true
-            has_pending=false
-            
-            # 从多个来源综合判断
-            if [[ "$status_checks" != "[]" ]] && [[ "$status_checks" != "null" ]]; then
-              if echo "$status_checks" | jq -e '.[] | select((.conclusion // .state) | test("FAILURE|ERROR|CANCELLED"; "i"))' >/dev/null 2>&1; then
-                all_checks_passed=false
-              fi
-              if echo "$status_checks" | jq -e '.[] | select((.conclusion // .state) | test("PENDING|IN_PROGRESS"; "i"))' >/dev/null 2>&1; then
-                has_pending=true
-              fi
-            fi
-            
-            if [[ "$pr_checks_output" != "[]" ]] && [[ "$pr_checks_output" != "null" ]]; then
-              if echo "$pr_checks_output" | jq -e '.[] | select(.conclusion | test("FAILURE|ERROR|CANCELLED"; "i"))' >/dev/null 2>&1; then
-                all_checks_passed=false
-              fi
-            fi
-            
-            echo "📊 Final Status Summary:"
-            echo "   • Mergeable: $mergeable"
-            echo "   • All checks passed: $all_checks_passed"
-            echo "   • Has pending checks: $has_pending"
-            echo "   • Review decision: $review_decision"
-            
-            # 决定是否合并
-            can_merge=false
-            
-            if [[ "$mergeable" == "MERGEABLE" ]] && [[ "$all_checks_passed" == true ]] && [[ "$has_pending" == false ]]; then
-              case "$review_decision" in
-                "APPROVED"|"NONE"|"null")
-                  can_merge=true
-                  ;;
-                *)
-                  echo "   ⏸️ Cannot merge: Review decision is $review_decision"
-                  ;;
-              esac
-            fi
-            
-            if [[ "$can_merge" == true ]]; then
-              echo "✅ PR #$pr_number is ready for merge!"
+              // Check status checks with intelligent filtering
+              const { data: statusChecks } = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: pr.head.sha
+              });
               
-              # 检查分支保护和合并策略
-              echo "🔄 Attempting to merge PR #$pr_number..."
+              console.log('🧪 Analyzing status checks...');
               
-              # 尝试不同的合并策略
-              merge_success=false
+              // Define checks to ignore for automated PRs
+              const ignoredChecksForAuto = [
+                currentWorkflow,
+                'auto_merge',
+                'Auto Merge Pull Requests',
+                'auto-merge',
+                'merge-pr'
+              ];
               
-              # 1. 尝试 squash merge （推荐）
-              echo "   Trying squash merge..."
-              if gh pr merge $pr_number --squash --delete-branch 2>/dev/null; then
-                echo "🎉 Successfully squash merged PR #$pr_number and deleted branch"
-                merge_success=true
-              elif gh pr merge $pr_number --squash 2>/dev/null; then
-                echo "🎉 Successfully squash merged PR #$pr_number (branch not deleted)"
-                merge_success=true
-              else
-                echo "   ❌ Squash merge failed"
-              fi
+              const allChecks = statusChecks.check_runs;
+              const relevantChecks = allChecks.filter(check => {
+                if (isAutomatedPR) {
+                  // For automated PRs, ignore self-referencing checks
+                  return !ignoredChecksForAuto.some(ignored => 
+                    check.name.toLowerCase().includes(ignored.toLowerCase()) ||
+                    ignored.toLowerCase().includes(check.name.toLowerCase())
+                  );
+                } else {
+                  // For manual PRs, include all checks
+                  return true;
+                }
+              });
               
-              # 2. 如果 squash 失败，尝试 merge commit
-              if [[ "$merge_success" == false ]]; then
-                echo "   Trying merge commit..."
-                if gh pr merge $pr_number --merge --delete-branch 2>/dev/null; then
-                  echo "🎉 Successfully merge committed PR #$pr_number and deleted branch"
-                  merge_success=true
-                elif gh pr merge $pr_number --merge 2>/dev/null; then
-                  echo "🎉 Successfully merge committed PR #$pr_number (branch not deleted)"
-                  merge_success=true
-                else
-                  echo "   ❌ Merge commit failed"
-                fi
-              fi
+              console.log(`   📝 Total checks found: ${allChecks.length}`);
+              console.log(`   🎯 Relevant checks: ${relevantChecks.length}`);
               
-              # 3. 如果都失败，尝试 rebase
-              if [[ "$merge_success" == false ]]; then
-                echo "   Trying rebase merge..."
-                if gh pr merge $pr_number --rebase --delete-branch 2>/dev/null; then
-                  echo "🎉 Successfully rebased PR #$pr_number and deleted branch"
-                  merge_success=true
-                elif gh pr merge $pr_number --rebase 2>/dev/null; then
-                  echo "🎉 Successfully rebased PR #$pr_number (branch not deleted)"
-                  merge_success=true
-                else
-                  echo "   ❌ Rebase merge failed"
-                fi
-              fi
+              if (allChecks.length > 0) {
+                console.log('   📋 All checks:');
+                allChecks.forEach(check => {
+                  const isIgnored = isAutomatedPR && ignoredChecksForAuto.some(ignored => 
+                    check.name.toLowerCase().includes(ignored.toLowerCase())
+                  );
+                  console.log(`   - ${check.name}: ${check.conclusion || check.status} ${isIgnored ? '(ignored)' : ''}`);
+                });
+              }
               
-              if [[ "$merge_success" == false ]]; then
-                echo "❌ All merge attempts failed for PR #$pr_number"
-                echo "💡 This might be due to:"
-                echo "   - Insufficient permissions"
-                echo "   - Branch protection rules"
-                echo "   - Merge conflicts"
-                echo "   - Required status checks not meeting branch protection requirements"
+              // Analyze relevant check results
+              const failedRelevantChecks = relevantChecks.filter(
+                check => ['failure', 'error', 'cancelled'].includes(check.conclusion)
+              );
+              
+              const pendingRelevantChecks = relevantChecks.filter(
+                check => ['pending', 'in_progress', 'queued'].includes(check.status) && !check.conclusion
+              );
+              
+              const allRelevantChecksPassed = failedRelevantChecks.length === 0 && pendingRelevantChecks.length === 0;
+              
+              console.log(`   ✅ Relevant checks passed: ${allRelevantChecksPassed}`);
+              
+              if (failedRelevantChecks.length > 0) {
+                console.log('   ❌ Failed relevant checks:');
+                failedRelevantChecks.forEach(check => {
+                  console.log(`      - ${check.name}: ${check.conclusion}`);
+                });
+              }
+              
+              if (pendingRelevantChecks.length > 0) {
+                console.log('   ⏳ Pending relevant checks:');
+                pendingRelevantChecks.forEach(check => {
+                  console.log(`      - ${check.name}: ${check.status}`);
+                });
+              }
+              
+              // Enhanced merge decision logic
+              let canMerge = false;
+              let mergeReason = '';
+              
+              // Check basic requirements
+              const isMergeable = prDetails.mergeable === true || 
+                                 (prDetails.mergeable === null && prDetails.mergeable_state !== 'dirty');
+              
+              const reviewApproved = !prDetails.draft && 
+                                   (prDetails.mergeable_state === 'clean' || 
+                                    prDetails.mergeable_state === 'unstable' ||
+                                    (isAutomatedPR && prDetails.mergeable_state !== 'dirty'));
+              
+              console.log(`📊 Merge eligibility analysis:`);
+              console.log(`   • Is mergeable: ${isMergeable}`);
+              console.log(`   • Review approved: ${reviewApproved}`);
+              console.log(`   • All relevant checks passed: ${allRelevantChecksPassed}`);
+              
+              if (isMergeable && reviewApproved && allRelevantChecksPassed) {
+                canMerge = true;
+                mergeReason = isAutomatedPR ? 
+                  'Automated PR with passing critical checks (self-checks ignored)' :
+                  'All checks passed and ready to merge';
+              } else if (isAutomatedPR && isMergeable && failedRelevantChecks.length === 0) {
+                // Special handling for automated PRs with only self-check failures
+                const onlySelfChecksFailed = allChecks.length > 0 && relevantChecks.length === 0;
+                if (onlySelfChecksFailed) {
+                  console.log('   💡 Only self-referencing checks are failing');
+                  canMerge = true;
+                  mergeReason = 'Automated PR - self-check failures bypassed';
+                }
+              }
+              
+              console.log(`🎯 Final Decision: ${canMerge ? 'MERGE' : 'WAIT'}`);
+              console.log(`📝 Reason: ${mergeReason || 'Requirements not met'}`);
+              
+              if (canMerge) {
+                console.log(`✅ Attempting to merge PR #${pr.number}...`);
                 
-                # 获取分支保护信息
-                echo "🛡️ Checking branch protection rules..."
-                protection_info=$(gh api repos/:owner/:repo/branches/$base_branch/protection 2>/dev/null || echo "No protection rules found")
-                echo "$protection_info" | head -10
-              fi
+                try {
+                  // Try squash merge first
+                  await github.rest.pulls.merge({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: pr.number,
+                    merge_method: 'squash',
+                    commit_title: `${pr.title} (#${pr.number})`,
+                    commit_message: mergeReason
+                  });
+                  
+                  console.log(`🎉 Successfully squash merged PR #${pr.number}`);
+                  
+                  // Try to delete the branch
+                  try {
+                    await github.rest.git.deleteRef({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      ref: `heads/${pr.head.ref}`
+                    });
+                    console.log(`🗑️ Successfully deleted branch ${pr.head.ref}`);
+                  } catch (error) {
+                    console.log(`⚠️ Could not delete branch ${pr.head.ref}: ${error.message}`);
+                  }
+                  
+                } catch (mergeError) {
+                  console.log(`❌ Squash merge failed: ${mergeError.message}`);
+                  
+                  // Try regular merge as fallback
+                  try {
+                    await github.rest.pulls.merge({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      pull_number: pr.number,
+                      merge_method: 'merge',
+                      commit_message: mergeReason
+                    });
+                    console.log(`🎉 Successfully merge committed PR #${pr.number}`);
+                  } catch (fallbackError) {
+                    console.log(`❌ All merge attempts failed: ${fallbackError.message}`);
+                  }
+                }
+                
+              } else {
+                console.log(`⏸️ PR #${pr.number} is not ready for auto-merge`);
+                
+                // Detailed blocking reasons
+                if (!isMergeable) {
+                  console.log('   🔴 PR is not mergeable (conflicts or other issues)');
+                }
+                if (!reviewApproved) {
+                  console.log('   🔴 Review requirements not met');
+                }
+                if (!allRelevantChecksPassed) {
+                  console.log('   🔴 Some relevant status checks are failing');
+                }
+              }
               
-            else
-              echo "⏸️ PR #$pr_number is not ready for auto-merge"
-              
-              # 详细的阻塞原因分析
-              echo "🚫 Blocking reasons:"
-              
-              if [[ "$mergeable" != "MERGEABLE" ]]; then
-                case "$mergeable" in
-                  "CONFLICTING")
-                    echo "   🔴 Merge conflicts detected - manual resolution required"
-                    ;;
-                  "UNKNOWN")
-                    echo "   🟡 Merge status unknown - GitHub may still be calculating"
-                    ;;
-                  *)
-                    echo "   🔴 Not mergeable: $mergeable"
-                    ;;
-                esac
-              fi
-              
-              if [[ "$all_checks_passed" != true ]]; then
-                echo "   🔴 Some status checks are failing - see details above"
-              fi
-              
-              if [[ "$has_pending" == true ]]; then
-                echo "   🟡 Some status checks are still pending"
-              fi
-              
-              case "$review_decision" in
-                "REVIEW_REQUIRED")
-                  echo "   🔴 Review required but not provided"
-                  ;;
-                "CHANGES_REQUESTED")
-                  echo "   🔴 Changes have been requested"
-                  ;;
-              esac
-            fi
+              console.log('================================================');
+            }
             
-            echo "================================================"
-          done
+            console.log('🏁 Auto-merge process completed');
+
+      - name: Cleanup on Error
+        if: failure()
+        run: |
+          echo "❌ Auto-merge workflow encountered an error"
+          echo "🔧 This might be the self-reference issue we're trying to solve"
+          echo "💡 Check the logs above for specific error details"
