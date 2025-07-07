@@ -1,0 +1,22 @@
+{
+  "name": "auto-merge-pr",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xuqssq/auto-merge-pr.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/xuqssq/auto-merge-pr/issues"
+  },
+  "homepage": "https://github.com/xuqssq/auto-merge-pr#readme",
+  "description": "",
+  "dependencies": {
+    "request": "^2.88.2"
+  }
+}
