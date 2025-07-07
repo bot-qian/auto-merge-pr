@@ -1,0 +1,80 @@
+name: Auto Merge Pull Requests
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+jobs:
+  auto_merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Git
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: Auto merge PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          # 获取所有开放的PR
+          prs=$(gh pr list --state open --json number,title,headRefName,author,baseRefName)
+          
+          if [[ "$prs" == "[]" ]]; then
+            echo "No open pull requests found."
+            exit 0
+          fi
+          
+          # 遍历每个PR
+          echo "$prs" | jq -c '.[]' | while read -r pr; do
+            pr_number=$(echo "$pr" | jq -r '.number')
+            pr_title=$(echo "$pr" | jq -r '.title')
+            pr_author=$(echo "$pr" | jq -r '.author.login')
+            head_branch=$(echo "$pr" | jq -r '.headRefName')
+            base_branch=$(echo "$pr" | jq -r '.baseRefName')
+            
+            echo "Processing PR #$pr_number: $pr_title by $pr_author"
+            echo "Head branch: $head_branch, Base branch: $base_branch"
+            
+            # 检查PR状态
+            pr_status=$(gh pr view $pr_number --json mergeable,reviewDecision)
+            mergeable=$(echo "$pr_status" | jq -r '.mergeable')
+            review_decision=$(echo "$pr_status" | jq -r '.reviewDecision')
+            
+            # 检查CI状态
+            pr_checks=$(gh pr checks $pr_number --json conclusion)
+            all_checks_passed=true
+            
+            if [[ "$pr_checks" != "[]" ]]; then
+              failed_count=$(echo "$pr_checks" | jq '[.[] | select(.conclusion != "SUCCESS" and .conclusion != "SKIPPED" and .conclusion != null)] | length')
+              if [[ "$failed_count" != "0" ]]; then
+                all_checks_passed=false
+                echo "❌ PR #$pr_number has $failed_count failing checks"
+              fi
+            fi
+            
+            if [[ "$mergeable" == "MERGEABLE" ]] && [[ "$all_checks_passed" == true ]]; then
+              echo "Merging PR #$pr_number..."
+              
+              # 检查是否是主分支，避免删除主分支
+              if [[ "$head_branch" == "main" ]] || [[ "$head_branch" == "master" ]] || [[ "$head_branch" == "$base_branch" ]]; then
+                echo "⚠️  Not deleting protected branch: $head_branch"
+                gh pr merge $pr_number --squash
+              else
+                # 只有非主分支才删除
+                gh pr merge $pr_number --squash --delete-branch
+              fi
+              
+              echo "✅ Successfully merged PR #$pr_number"
+            else
+              echo "❌ PR #$pr_number is not ready for merge."
+              echo "   Mergeable: $mergeable"
+              echo "   All checks passed: $all_checks_passed"
+              echo "   Review decision: $review_decision"
+            fi
+          done
