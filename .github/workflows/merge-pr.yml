@@ -1,14 +1,15 @@
 name: Auto Merge Pull Requests
 on:
   schedule:
-    - cron: "0 0 * * *"
-  workflow_dispatch:
+    - cron: "0 0 * * *"  # 每天运行一次
+  workflow_dispatch:  # 允许手动触发
   pull_request:
     types: [opened, synchronize, ready_for_review]
 
 jobs:
   auto_merge:
     runs-on: ubuntu-latest
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -20,15 +21,20 @@ jobs:
 
       - name: Auto merge PRs
         env:
-          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+          # 使用正确的token变量名
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
+          echo "🔍 Getting all open pull requests..."
+          
           # 获取所有开放的PR
           prs=$(gh pr list --state open --json number,title,headRefName,author,baseRefName)
           
           if [[ "$prs" == "[]" ]]; then
-            echo "No open pull requests found."
+            echo "ℹ️ No open pull requests found."
             exit 0
           fi
+          
+          echo "📋 Found $(echo "$prs" | jq length) open PR(s)"
           
           # 遍历每个PR
           echo "$prs" | jq -c '.[]' | while read -r pr; do
@@ -38,43 +44,108 @@ jobs:
             head_branch=$(echo "$pr" | jq -r '.headRefName')
             base_branch=$(echo "$pr" | jq -r '.baseRefName')
             
-            echo "Processing PR #$pr_number: $pr_title by $pr_author"
-            echo "Head branch: $head_branch, Base branch: $base_branch"
+            echo "================================================"
+            echo "🔄 Processing PR #$pr_number: $pr_title"
+            echo "👤 Author: $pr_author"
+            echo "🌿 Branch: $head_branch → $base_branch"
             
             # 检查PR状态
-            pr_status=$(gh pr view $pr_number --json mergeable,reviewDecision)
+            echo "🔍 Checking PR status..."
+            pr_status=$(gh pr view $pr_number --json mergeable,reviewDecision,statusCheckRollup)
             mergeable=$(echo "$pr_status" | jq -r '.mergeable')
             review_decision=$(echo "$pr_status" | jq -r '.reviewDecision')
             
-            # 检查CI状态
-            pr_checks=$(gh pr checks $pr_number --json conclusion)
+            # 检查CI状态 - 使用更可靠的方法
+            echo "🧪 Checking CI status..."
             all_checks_passed=true
             
+            # 检查状态检查
+            status_rollup=$(echo "$pr_status" | jq -r '.statusCheckRollup[]?.conclusion' 2>/dev/null || echo "")
+            
+            if [[ -n "$status_rollup" ]]; then
+              while IFS= read -r status; do
+                if [[ "$status" != "SUCCESS" ]] && [[ "$status" != "NEUTRAL" ]] && [[ "$status" != "SKIPPED" ]] && [[ -n "$status" ]] && [[ "$status" != "null" ]]; then
+                  all_checks_passed=false
+                  echo "❌ Found failing status: $status"
+                  break
+                fi
+              done <<< "$status_rollup"
+            fi
+            
+            # 额外检查：使用 gh pr checks 命令
+            pr_checks=$(gh pr checks $pr_number --json conclusion,name 2>/dev/null || echo "[]")
+            
             if [[ "$pr_checks" != "[]" ]]; then
-              failed_count=$(echo "$pr_checks" | jq '[.[] | select(.conclusion != "SUCCESS" and .conclusion != "SKIPPED" and .conclusion != null)] | length')
-              if [[ "$failed_count" != "0" ]]; then
+              failed_checks=$(echo "$pr_checks" | jq -r '.[] | select(.conclusion != "SUCCESS" and .conclusion != "SKIPPED" and .conclusion != "NEUTRAL" and .conclusion != null) | .name' 2>/dev/null || echo "")
+              
+              if [[ -n "$failed_checks" ]]; then
                 all_checks_passed=false
-                echo "❌ PR #$pr_number has $failed_count failing checks"
+                echo "❌ Failed checks found:"
+                echo "$failed_checks" | while IFS= read -r check; do
+                  echo "   - $check"
+                done
               fi
             fi
             
+            echo "📊 Status Summary:"
+            echo "   • Mergeable: $mergeable"
+            echo "   • All checks passed: $all_checks_passed"
+            echo "   • Review decision: $review_decision"
+            
+            # 检查合并条件
             if [[ "$mergeable" == "MERGEABLE" ]] && [[ "$all_checks_passed" == true ]]; then
-              echo "Merging PR #$pr_number..."
+              echo "✅ PR is ready for merge!"
               
-              # 检查是否是主分支，避免删除主分支
-              if [[ "$head_branch" == "main" ]] || [[ "$head_branch" == "master" ]] || [[ "$head_branch" == "$base_branch" ]]; then
-                echo "⚠️  Not deleting protected branch: $head_branch"
+              # 检查是否是受保护的分支
+              protected_branches=("main" "master" "develop" "staging")
+              is_protected=false
+              
+              for protected in "${protected_branches[@]}"; do
+                if [[ "$head_branch" == "$protected" ]] || [[ "$head_branch" == "$base_branch" ]]; then
+                  is_protected=true
+                  break
+                fi
+              done
+              
+              if [[ "$is_protected" == true ]]; then
+                echo "⚠️ Protected branch detected: $head_branch"
+                echo "🔄 Merging without deleting branch..."
                 gh pr merge $pr_number --squash
               else
-                # 只有非主分支才删除
+                echo "🔄 Merging and deleting feature branch: $head_branch"
                 gh pr merge $pr_number --squash --delete-branch
               fi
               
-              echo "✅ Successfully merged PR #$pr_number"
+              echo "🎉 Successfully merged PR #$pr_number"
+              
             else
-              echo "❌ PR #$pr_number is not ready for merge."
-              echo "   Mergeable: $mergeable"
-              echo "   All checks passed: $all_checks_passed"
-              echo "   Review decision: $review_decision"
+              echo "⏸️ PR #$pr_number is not ready for auto-merge"
+              
+              # 详细的阻塞原因
+              if [[ "$mergeable" != "MERGEABLE" ]]; then
+                case "$mergeable" in
+                  "CONFLICTING")
+                    echo "   🔴 Reason: Merge conflicts detected"
+                    ;;
+                  "UNKNOWN")
+                    echo "   🟡 Reason: Merge status unknown (may be calculating)"
+                    ;;
+                  *)
+                    echo "   🔴 Reason: Not mergeable ($mergeable)"
+                    ;;
+                esac
+              fi
+              
+              if [[ "$all_checks_passed" != true ]]; then
+                echo "   🔴 Reason: Some status checks are failing"
+              fi
+              
+              if [[ "$review_decision" == "REVIEW_REQUIRED" ]]; then
+                echo "   🔴 Reason: Review required"
+              elif [[ "$review_decision" == "CHANGES_REQUESTED" ]]; then
+                echo "   🔴 Reason: Changes requested"
+              fi
             fi
+            
+            echo "================================================"
           done
