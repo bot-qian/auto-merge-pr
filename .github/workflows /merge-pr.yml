@@ -1,0 +1,55 @@
+name: Auto Merge Pull Requests
+on:
+  schedule:
+    - cron: "0 0 * * *"  # 每天午夜运行
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+jobs:
+  auto_merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Git
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: Auto merge PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          # 获取所有开放的PR
+          prs=$(gh pr list --state open --json number,title,headRefName,author)
+          
+          if [[ "$prs" == "[]" ]]; then
+            echo "No open pull requests found."
+            exit 0
+          fi
+          
+          # 遍历每个PR
+          echo "$prs" | jq -c '.[]' | while read -r pr; do
+            pr_number=$(echo "$pr" | jq -r '.number')
+            pr_title=$(echo "$pr" | jq -r '.title')
+            pr_author=$(echo "$pr" | jq -r '.author.login')
+            branch_name=$(echo "$pr" | jq -r '.headRefName')
+            
+            echo "Processing PR #$pr_number: $pr_title by $pr_author"
+            
+            # 可以添加条件过滤，比如只合并特定标签的PR
+            # 检查PR状态
+            pr_status=$(gh pr view $pr_number --json mergeable,reviewDecision)
+            mergeable=$(echo "$pr_status" | jq -r '.mergeable')
+            review_decision=$(echo "$pr_status" | jq -r '.reviewDecision')
+            
+            if [[ "$mergeable" == "MERGEABLE" ]]; then
+              echo "Merging PR #$pr_number..."
+              gh pr merge $pr_number --squash --delete-branch
+              echo "✅ Successfully merged PR #$pr_number"
+            else
+              echo "❌ PR #$pr_number is not mergeable. Status: $mergeable, Review: $review_decision"
+            fi
+          done
