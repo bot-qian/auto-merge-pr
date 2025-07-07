@@ -10,20 +10,18 @@ jobs:
   auto_merge:
     runs-on: ubuntu-latest
     
-    # 增加更全面的权限
+    # 修正权限设置 - 移除无效的 metadata
     permissions:
       contents: write          # 写入仓库内容
       pull-requests: write     # 写入PR
       checks: read            # 读取检查状态
       statuses: read          # 读取状态
       actions: read           # 读取actions状态
-      metadata: read          # 读取仓库元数据
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # 使用 token 进行 checkout，确保后续操作有权限
           token: ${{ github.token }}
 
       - name: Set up Git
@@ -34,7 +32,6 @@ jobs:
       - name: Auto merge PRs
         env:
           GH_TOKEN: ${{ github.token }}
-          # 添加 GitHub token 作为备用
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           echo "🔍 Getting all open pull requests..."
