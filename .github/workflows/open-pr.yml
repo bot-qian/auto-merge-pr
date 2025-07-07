@@ -1,7 +1,7 @@
 name: Auto Run Script and Create PR
 on:
   schedule:
-    - cron: "0 2 * * *" # 每天凌晨2点运行
+    - cron: "0 * * * *"
   workflow_dispatch: # 支持手动触发
 
 jobs:
