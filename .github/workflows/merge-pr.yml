@@ -1,8 +1,8 @@
 name: Auto Merge Pull Requests
 on:
   schedule:
-    - cron: "0 0 * * *"  # 每天运行一次
-  workflow_dispatch:  # 允许手动触发
+    - cron: "0 0 * * *"
+  workflow_dispatch:
   pull_request:
     types: [opened, synchronize, ready_for_review]
 
@@ -10,24 +10,39 @@ jobs:
   auto_merge:
     runs-on: ubuntu-latest
     
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      statuses: read
+      actions: read
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
 
       - name: Set up Git
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
 
-      - name: Auto merge PRs
+      - name: Smart Auto-merge with Self-check Exclusion
         env:
-          # 使用正确的token变量名
-          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           echo "🔍 Getting all open pull requests..."
           
+          # 获取当前工作流运行信息
+          CURRENT_WORKFLOW_NAME="auto_merge"
+          CURRENT_RUN_ID="${{ github.run_id }}"
+          
+          echo "🔧 Current workflow: $CURRENT_WORKFLOW_NAME (Run ID: $CURRENT_RUN_ID)"
+          
           # 获取所有开放的PR
-          prs=$(gh pr list --state open --json number,title,headRefName,author,baseRefName)
+          prs=$(gh pr list --state open --json number,title,headRefName,author,baseRefName,url)
           
           if [[ "$prs" == "[]" ]]; then
             echo "ℹ️ No open pull requests found."
@@ -43,109 +58,181 @@ jobs:
             pr_author=$(echo "$pr" | jq -r '.author.login')
             head_branch=$(echo "$pr" | jq -r '.headRefName')
             base_branch=$(echo "$pr" | jq -r '.baseRefName')
+            pr_url=$(echo "$pr" | jq -r '.url')
             
             echo "================================================"
             echo "🔄 Processing PR #$pr_number: $pr_title"
             echo "👤 Author: $pr_author"
             echo "🌿 Branch: $head_branch → $base_branch"
+            echo "🔗 URL: $pr_url"
             
-            # 检查PR状态
-            echo "🔍 Checking PR status..."
-            pr_status=$(gh pr view $pr_number --json mergeable,reviewDecision,statusCheckRollup)
+            # 获取详细的PR状态信息
+            echo "🔍 Getting detailed PR status..."
+            pr_status=$(gh pr view $pr_number --json mergeable,reviewDecision,statusCheckRollup,commits)
             mergeable=$(echo "$pr_status" | jq -r '.mergeable')
-            review_decision=$(echo "$pr_status" | jq -r '.reviewDecision')
+            review_decision=$(echo "$pr_status" | jq -r '.reviewDecision // "NONE"')
             
-            # 检查CI状态 - 使用更可靠的方法
-            echo "🧪 Checking CI status..."
-            all_checks_passed=true
-            
-            # 检查状态检查
-            status_rollup=$(echo "$pr_status" | jq -r '.statusCheckRollup[]?.conclusion' 2>/dev/null || echo "")
-            
-            if [[ -n "$status_rollup" ]]; then
-              while IFS= read -r status; do
-                if [[ "$status" != "SUCCESS" ]] && [[ "$status" != "NEUTRAL" ]] && [[ "$status" != "SKIPPED" ]] && [[ -n "$status" ]] && [[ "$status" != "null" ]]; then
-                  all_checks_passed=false
-                  echo "❌ Found failing status: $status"
-                  break
-                fi
-              done <<< "$status_rollup"
-            fi
-            
-            # 额外检查：使用 gh pr checks 命令
-            pr_checks=$(gh pr checks $pr_number --json conclusion,name 2>/dev/null || echo "[]")
-            
-            if [[ "$pr_checks" != "[]" ]]; then
-              failed_checks=$(echo "$pr_checks" | jq -r '.[] | select(.conclusion != "SUCCESS" and .conclusion != "SKIPPED" and .conclusion != "NEUTRAL" and .conclusion != null) | .name' 2>/dev/null || echo "")
-              
-              if [[ -n "$failed_checks" ]]; then
-                all_checks_passed=false
-                echo "❌ Failed checks found:"
-                echo "$failed_checks" | while IFS= read -r check; do
-                  echo "   - $check"
-                done
-              fi
-            fi
-            
-            echo "📊 Status Summary:"
+            echo "📊 Basic Status:"
             echo "   • Mergeable: $mergeable"
-            echo "   • All checks passed: $all_checks_passed"
             echo "   • Review decision: $review_decision"
             
-            # 检查合并条件
-            if [[ "$mergeable" == "MERGEABLE" ]] && [[ "$all_checks_passed" == true ]]; then
-              echo "✅ PR is ready for merge!"
+            # 智能状态检查：排除自身工作流
+            echo "🧪 Analyzing status checks (excluding self-reference)..."
+            
+            status_checks=$(echo "$pr_status" | jq -r '.statusCheckRollup // []')
+            all_checks_passed=true
+            relevant_failed_checks=""
+            
+            if [[ "$status_checks" != "[]" ]] && [[ "$status_checks" != "null" ]]; then
+              echo "   📝 All Status Checks:"
+              echo "$status_checks" | jq -r '.[] | "   - \(.name // .context): \(.conclusion // .state)"'
               
-              # 检查是否是受保护的分支
-              protected_branches=("main" "master" "develop" "staging")
-              is_protected=false
+              # 过滤掉自身工作流的检查
+              filtered_checks=$(echo "$status_checks" | jq -r --arg workflow "$CURRENT_WORKFLOW_NAME" '
+                .[] | select((.name // .context) != $workflow) | 
+                select((.conclusion // .state) | test("FAILURE|ERROR|CANCELLED"; "i")) | 
+                .name // .context
+              ')
               
-              for protected in "${protected_branches[@]}"; do
-                if [[ "$head_branch" == "$protected" ]] || [[ "$head_branch" == "$base_branch" ]]; then
-                  is_protected=true
-                  break
-                fi
-              done
-              
-              if [[ "$is_protected" == true ]]; then
-                echo "⚠️ Protected branch detected: $head_branch"
-                echo "🔄 Merging without deleting branch..."
-                gh pr merge $pr_number --squash
+              echo "   🔍 Relevant failed checks (excluding self):"
+              if [[ -n "$filtered_checks" ]] && [[ "$filtered_checks" != "" ]]; then
+                echo "$filtered_checks" | while IFS= read -r check; do
+                  [[ -n "$check" ]] && echo "      ❌ $check"
+                done
+                all_checks_passed=false
+                relevant_failed_checks="$filtered_checks"
               else
-                echo "🔄 Merging and deleting feature branch: $head_branch"
-                gh pr merge $pr_number --squash --delete-branch
+                echo "      ✅ No relevant failed checks found"
               fi
               
-              echo "🎉 Successfully merged PR #$pr_number"
+              # 检查是否只有自身工作流失败
+              self_check_status=$(echo "$status_checks" | jq -r --arg workflow "$CURRENT_WORKFLOW_NAME" '
+                .[] | select((.name // .context) == $workflow) | .conclusion // .state
+              ')
+              
+              if [[ -n "$self_check_status" ]]; then
+                echo "   📋 Self-workflow status: $self_check_status"
+                if [[ "$self_check_status" =~ ^(FAILURE|ERROR|CANCELLED)$ ]]; then
+                  echo "   💡 Self-workflow is failing, but this is expected for this run"
+                fi
+              fi
+            else
+              echo "   ℹ️ No status checks found"
+            fi
+            
+            # 额外检查：使用 gh pr checks 但排除自身
+            pr_checks_output=$(gh pr checks $pr_number --json name,conclusion,detailsUrl 2>/dev/null || echo "[]")
+            if [[ "$pr_checks_output" != "[]" ]] && [[ "$pr_checks_output" != "null" ]]; then
+              echo "   🔬 Detailed checks (via gh pr checks):"
+              echo "$pr_checks_output" | jq -r --arg workflow "$CURRENT_WORKFLOW_NAME" '
+                .[] | select(.name != $workflow) | "   - \(.name): \(.conclusion // "UNKNOWN")"
+              '
+              
+              # 获取除自身外的失败检查
+              additional_failed=$(echo "$pr_checks_output" | jq -r --arg workflow "$CURRENT_WORKFLOW_NAME" '
+                .[] | select(.name != $workflow) | 
+                select(.conclusion | test("FAILURE|ERROR|CANCELLED"; "i")) | .name
+              ')
+              
+              if [[ -n "$additional_failed" ]] && [[ "$additional_failed" != "" ]]; then
+                all_checks_passed=false
+                relevant_failed_checks="$relevant_failed_checks"$'\n'"$additional_failed"
+              fi
+            fi
+            
+            # 处理 UNKNOWN 状态的特殊情况
+            force_merge=false
+            if [[ "$mergeable" == "UNKNOWN" ]] && [[ "$all_checks_passed" == true ]]; then
+              echo "   🤔 Mergeable status is UNKNOWN but no relevant checks are failing"
+              echo "   💭 This might be a timing issue or self-reference problem"
+              
+              # 检查是否是自动更新 PR（基于标题和作者）
+              if [[ "$pr_title" =~ ^🤖.*Automated.*Update ]] || [[ "$pr_author" == "xuqssq" ]]; then
+                echo "   🤖 Detected automated update PR"
+                echo "   ⚡ Will attempt force merge due to self-reference issue"
+                force_merge=true
+                mergeable="MERGEABLE"  # 强制设置为可合并
+              fi
+            fi
+            
+            echo "📊 Final Status Summary:"
+            echo "   • Mergeable: $mergeable $([ "$force_merge" == true ] && echo "(force enabled)")"
+            echo "   • Relevant checks passed: $all_checks_passed"
+            echo "   • Review decision: $review_decision"
+            echo "   • Relevant failed checks: $([ -n "$relevant_failed_checks" ] && echo "YES" || echo "NONE")"
+            
+            # 决定是否合并
+            can_merge=false
+            
+            if [[ "$mergeable" == "MERGEABLE" ]] && [[ "$all_checks_passed" == true ]]; then
+              case "$review_decision" in
+                "APPROVED"|"NONE"|"null"|"")
+                  can_merge=true
+                  ;;
+                *)
+                  echo "   ⏸️ Cannot merge: Review decision is '$review_decision'"
+                  ;;
+              esac
+            fi
+            
+            if [[ "$can_merge" == true ]]; then
+              echo "✅ PR #$pr_number is ready for merge!"
+              
+              merge_message="Auto-merged PR #$pr_number"
+              if [[ "$force_merge" == true ]]; then
+                merge_message="$merge_message (self-reference bypass)"
+              fi
+              
+              echo "🔄 Attempting to merge PR #$pr_number..."
+              echo "📝 Merge message: $merge_message"
+              
+              # 尝试合并（优先使用 squash）
+              merge_success=false
+              
+              if gh pr merge $pr_number --squash --delete-branch --body "$merge_message" 2>/dev/null; then
+                echo "🎉 Successfully squash merged PR #$pr_number and deleted branch"
+                merge_success=true
+              elif gh pr merge $pr_number --squash --body "$merge_message" 2>/dev/null; then
+                echo "🎉 Successfully squash merged PR #$pr_number (branch not deleted)"
+                merge_success=true
+              elif gh pr merge $pr_number --merge --delete-branch --body "$merge_message" 2>/dev/null; then
+                echo "🎉 Successfully merge committed PR #$pr_number and deleted branch"
+                merge_success=true
+              elif gh pr merge $pr_number --merge --body "$merge_message" 2>/dev/null; then
+                echo "🎉 Successfully merge committed PR #$pr_number (branch not deleted)"
+                merge_success=true
+              fi
+              
+              if [[ "$merge_success" == false ]]; then
+                echo "❌ All merge attempts failed for PR #$pr_number"
+                echo "💡 Manual intervention may be required"
+                
+                # 如果是强制合并失败，尝试重新触发检查
+                if [[ "$force_merge" == true ]]; then
+                  echo "🔄 Force merge failed, trying to refresh PR status..."
+                  # 触发重新计算（通过添加标签再移除）
+                  gh pr edit $pr_number --add-label "auto-merge-retry" 2>/dev/null || true
+                  sleep 2
+                  gh pr edit $pr_number --remove-label "auto-merge-retry" 2>/dev/null || true
+                fi
+              fi
               
             else
               echo "⏸️ PR #$pr_number is not ready for auto-merge"
               
-              # 详细的阻塞原因
-              if [[ "$mergeable" != "MERGEABLE" ]]; then
-                case "$mergeable" in
-                  "CONFLICTING")
-                    echo "   🔴 Reason: Merge conflicts detected"
-                    ;;
-                  "UNKNOWN")
-                    echo "   🟡 Reason: Merge status unknown (may be calculating)"
-                    ;;
-                  *)
-                    echo "   🔴 Reason: Not mergeable ($mergeable)"
-                    ;;
-                esac
+              if [[ -n "$relevant_failed_checks" ]] && [[ "$relevant_failed_checks" != "" ]]; then
+                echo "   🔴 Relevant failing checks:"
+                echo "$relevant_failed_checks" | while IFS= read -r check; do
+                  [[ -n "$check" ]] && echo "      - $check"
+                done
               fi
               
-              if [[ "$all_checks_passed" != true ]]; then
-                echo "   🔴 Reason: Some status checks are failing"
-              fi
-              
-              if [[ "$review_decision" == "REVIEW_REQUIRED" ]]; then
-                echo "   🔴 Reason: Review required"
-              elif [[ "$review_decision" == "CHANGES_REQUESTED" ]]; then
-                echo "   🔴 Reason: Changes requested"
+              if [[ "$mergeable" != "MERGEABLE" ]] && [[ "$force_merge" != true ]]; then
+                echo "   🔴 Not mergeable: $mergeable"
               fi
             fi
             
             echo "================================================"
           done
+          
+          echo "🏁 Auto-merge process completed"

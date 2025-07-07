@@ -106,7 +106,7 @@ jobs:
             if [[ -z "$staged_files" ]]; then
               echo "⚠️ No files were staged for commit"
               echo "Adding all changes..."
-              git add .
+              git add ./images
             fi
             
             # 统计变更
