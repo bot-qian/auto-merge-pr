@@ -1,0 +1,113 @@
+name: Auto Run Script and Create PR
+on:
+  schedule:
+    - cron: "0 2 * * *" # 每天凌晨2点运行
+  workflow_dispatch: # 支持手动触发
+
+jobs:
+  run_script_and_create_pr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.BOT_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+          elif [ -f package-lock.json ]; then
+            npm install
+          else
+            echo "No package.json found, skipping npm install"
+          fi
+
+      - name: Set up Git
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions Bot"
+
+      - name: Run commit script and create PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TARGET_REPO: "bot-qian/auto-merge-pr" # 目标仓库
+        run: |
+          echo "🚀 Starting automated script execution and PR creation..."
+
+          # 生成唯一的分支名
+          timestamp=$(date +%Y%m%d-%H%M%S)
+          branch_name="auto-update-${timestamp}"
+
+          echo "📝 Running commit script..."
+          # 运行您的脚本
+          if node scripts/commit.js; then
+            echo "✅ Script executed successfully"
+          else
+            echo "❌ Script execution failed"
+            exit 1
+          fi
+
+          # 检查是否有文件变更
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "📁 Changes detected, proceeding with PR creation..."
+            
+            # 切换到新分支
+            git checkout -b $branch_name
+            
+            # 添加所有变更
+            git add ./images
+            
+            # 提交变更
+            commit_message="chore: automated update - $(date '+%Y-%m-%d %H:%M:%S')"
+            git commit -m "$commit_message"
+            
+            # 推送分支到远程
+            git push origin $branch_name
+            
+            # 创建 Pull Request
+            pr_title="🤖 Automated Update - $(date '+%Y-%m-%d')"
+            pr_body="This PR was automatically created by GitHub Actions.
+
+            ## Changes
+            - Executed \`node scripts/commit.js\`
+            - Generated on: $(date '+%Y-%m-%d %H:%M:%S UTC')
+            
+            ## Auto-merge
+            This PR can be automatically merged if all checks pass.
+            
+            ---
+            *Created by [GitHub Actions](https://github.com/${{ github.repository }}/actions)*"
+            
+            # 创建PR并添加auto-merge标签
+            pr_url=$(gh pr create \
+              --repo "$TARGET_REPO" \
+              --base main \
+              --head $branch_name \
+              --title "$pr_title" \
+              --body "$pr_body" \
+              --label "auto-merge,automated")
+            
+            echo "✅ Pull Request created: $pr_url"
+            
+            # 可选：立即启用auto-merge
+            pr_number=$(echo "$pr_url" | grep -o '[0-9]*$')
+            echo "🔄 Enabling auto-merge for PR #$pr_number"
+            
+            # 等待一下让GitHub处理PR创建
+            sleep 5
+            
+            # 启用auto-merge (需要仓库启用了auto-merge功能)
+            gh pr merge $pr_number --auto --squash --repo "$TARGET_REPO" || echo "⚠️ Auto-merge not available, PR will need manual merge"
+            
+          else
+            echo "ℹ️ No changes detected after running script, skipping PR creation"
+          fi
